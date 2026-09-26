@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: urdu-banking-translator
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: qwen/qwen3.8-27b:free
+      - key: OPENROUTER_FALLBACK_MODELS
+        value: nvidia/nemotron-3-ultra-550b-a55b:free,google/gemma-4-26b-a4b-it:free
+      - key: TRANSLATOR_DB_PATH
+        value: translator.db

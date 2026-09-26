@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Urdu Banking Translator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Nastaliq+Urdu:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f6f7fb;
+    --panel: #ffffff;
+    --border: #e2e5ec;
+    --text: #1c2033;
+    --muted: #6b7086;
+    --accent: #3457d5;
+    --good: #1a9e6b;
+    --warn: #b77b06;
+    --bad: #d1444e;
+    --radius: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14151f;
+      --panel: #1c1e2b;
+      --border: #2c2f42;
+      --text: #eceef7;
+      --muted: #9498b0;
+      --accent: #7d97ff;
+      --good: #34d399;
+      --warn: #f2b93d;
+      --bad: #f36b74;
+    }
+  }
+  * { box-sizing: border-box; }
+  .hidden { display: none !important; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 24px 16px 64px;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; }
+  h1 { font-size: 1.35rem; margin: 0 0 4px; }
+  .subtitle { margin: 0 0 20px; color: var(--muted); font-size: 0.9rem; }
+
+  .lang-bar {
+    display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px;
+    margin-bottom: 10px;
+  }
+  .lang-bar select, .lang-bar .target-label {
+    width: 100%; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text); font-size: 0.95rem; font-family: inherit;
+  }
+  .target-label { display: block; }
+  .icon-btn {
+    border: 1px solid var(--border); background: var(--panel); color: var(--text);
+    border-radius: 10px; padding: 8px 12px; cursor: pointer; font-size: 1rem; line-height: 1;
+  }
+  .icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 720px) {
+    .panes { grid-template-columns: 1fr; }
+  }
+  .pane {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    display: flex; flex-direction: column; min-height: 220px;
+  }
+  .pane.output { background: color-mix(in srgb, var(--panel) 70%, var(--bg)); }
+  textarea {
+    flex: 1; border: none; outline: none; resize: none; background: transparent; color: var(--text);
+    font: inherit; font-size: 1.15rem; line-height: 1.6; padding: 16px; min-height: 180px;
+  }
+  textarea:dir(rtl), .out-text[dir="rtl"] {
+    font-family: "Noto Nastaliq Urdu", serif; line-height: 2.2; font-size: 1.25rem;
+  }
+  .out-text {
+    flex: 1; padding: 16px; font-size: 1.15rem; line-height: 1.6; white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .out-text.placeholder { color: var(--muted); }
+  .out-text.pending::after {
+    content: "▍"; color: var(--accent); animation: blink 1s steps(2) infinite; margin-inline-start: 2px;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .pane-footer {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 8px 12px; border-top: 1px solid var(--border); font-size: 0.8rem; color: var(--muted);
+    min-height: 44px; flex-wrap: wrap;
+  }
+  .footer-actions { display: flex; gap: 6px; }
+  .small-btn {
+    border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 0.8rem;
+    padding: 4px 8px; border-radius: 6px;
+  }
+  .small-btn:hover { background: var(--bg); color: var(--text); }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px;
+    font-size: 0.75rem; font-weight: 600; border: 1px solid currentColor;
+  }
+  .badge.good { color: var(--good); }
+  .badge.warn { color: var(--warn); }
+  .badge.bad { color: var(--bad); }
+
+  details.checks { margin-top: 10px; font-size: 0.85rem; color: var(--muted); }
+  details.checks summary { cursor: pointer; }
+  details.checks ul { margin: 8px 0 0; padding-left: 18px; }
+  .shield-label { margin: 12px 0 6px; }
+  pre.sent {
+    margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--panel);
+    border: 1px solid var(--border); color: var(--text); white-space: pre-wrap;
+    overflow-wrap: anywhere; font-size: 0.85rem; unicode-bidi: plaintext;
+  }
+  .error { color: var(--bad); font-size: 0.85rem; margin-top: 10px; min-height: 1em; }
+
+  .status-row {
+    display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; font-size: 0.8rem; color: var(--muted);
+  }
+  .status-item { display: inline-flex; align-items: center; gap: 6px; }
+  .status-item::before {
+    content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--good); flex: none;
+  }
+  .status-item.bad { color: var(--bad); }
+  .status-item.bad::before { background: var(--bad); }
+  .status-item.pending::before { background: var(--warn); }
+
+  .feedback-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 0.85rem; color: var(--muted); flex-wrap: wrap; }
+  .vote {
+    border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 4px 10px;
+    cursor: pointer; font-size: 1rem; line-height: 1.2;
+  }
+  .vote:hover { border-color: var(--accent); }
+  .vote[aria-pressed="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, var(--panel)); }
+  .feedback-form {
+    display: grid; gap: 8px; margin-top: 8px; padding: 12px; border: 1px solid var(--border);
+    border-radius: 10px; background: var(--panel); max-width: 640px;
+  }
+  .feedback-form select, .feedback-form input, .feedback-form textarea {
+    width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font: inherit; font-size: 0.9rem;
+  }
+  .feedback-form textarea { min-height: 70px; resize: vertical; }
+  .feedback-form .hint { margin: 0; font-size: 0.78rem; color: var(--muted); }
+  .feedback-form .actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .primary-btn {
+    background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 7px 14px;
+    cursor: pointer; font-size: 0.85rem;
+  }
+
+  .history { margin-top: 32px; }
+  .history-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .history-head h2 { font-size: 1rem; margin: 0; }
+  .history-head span { color: var(--muted); font-size: 0.8rem; margin-inline-start: 8px; font-weight: 400; }
+  .history-list { display: grid; gap: 8px; }
+  .history-item {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; cursor: pointer; text-align: start;
+    color: var(--text); font: inherit; width: 100%;
+  }
+  .history-item:hover { border-color: var(--accent); }
+  .history-item .meta { grid-column: 1 / -1; font-size: 0.72rem; color: var(--muted); }
+  .history-item .h-text { font-size: 0.9rem; overflow-wrap: anywhere; }
+  .history-item .h-text[dir="rtl"] { font-family: "Noto Nastaliq Urdu", serif; line-height: 2; }
+  @media (max-width: 720px) { .history-item { grid-template-columns: 1fr; } }
+  .empty { color: var(--muted); font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>English ⇄ Urdu Banking Translator</h1>
+  <p class="subtitle">IBANs, CNICs, account numbers, amounts and transaction IDs are shielded on the server and never sent to the AI model. Translates as you type; Ctrl+Enter translates immediately.</p>
+
+  <div class="lang-bar">
+    <select id="sourceLang" aria-label="Source language">
+      <option value="auto">Detect language</option>
+      <option value="en">English</option>
+      <option value="ur">Urdu / Roman Urdu</option>
+    </select>
+    <button class="icon-btn" id="swapBtn" title="Swap languages" aria-label="Swap languages">⇄</button>
+    <span class="target-label" id="targetLabel">Urdu</span>
+  </div>
+
+  <div class="panes">
+    <div class="pane">
+      <textarea id="input" dir="auto" maxlength="5000" placeholder="Enter text" aria-label="Source text"></textarea>
+      <div class="pane-footer">
+        <span id="detected"></span>
+        <div class="footer-actions">
+          <span id="charCount">0 / 5000</span>
+          <button class="small-btn" id="clearBtn" title="Clear text">Clear</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="pane output">
+      <div class="out-text placeholder" id="output" aria-live="polite">Translation</div>
+      <div class="pane-footer">
+        <span id="resultMeta"></span>
+        <div class="footer-actions">
+          <button class="small-btn" id="copyBtn" title="Copy translation">Copy</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="error" id="error"></div>
+
+  <div class="status-row hidden" id="privacyStatus" aria-live="polite">
+    <span class="status-item" id="psProtected"></span>
+    <span class="status-item" title="The server verified the outgoing prompt contained none of the protected values">Originals not sent to model</span>
+    <span class="status-item" id="psIntegrity"></span>
+    <span class="status-item" title="History and feedback store placeholders, never the real values">History stores masked text only</span>
+  </div>
+
+  <div class="feedback-row hidden" id="feedbackRow">
+    <span>Rate this translation</span>
+    <button class="vote" id="upBtn" type="button" aria-pressed="false" aria-label="Good translation">👍</button>
+    <button class="vote" id="downBtn" type="button" aria-pressed="false" aria-label="Bad translation">👎</button>
+    <span id="feedbackStatus"></span>
+  </div>
+  <form class="feedback-form hidden" id="feedbackForm">
+    <select id="fbCategory" aria-label="Issue category"></select>
+    <input id="fbComment" maxlength="500" placeholder="What was wrong? (optional)" aria-label="Comment">
+    <textarea id="fbCorrection" dir="auto" maxlength="5000" placeholder="Better translation (optional)" aria-label="Corrected translation"></textarea>
+    <p class="hint">Saved masked: amounts, IBANs, account numbers and other sensitive values are replaced with placeholders before storing. Feedback is monitored only; translations change only when several people independently report the same issue and a reviewer approves the fix.</p>
+    <div class="actions">
+      <button class="small-btn" type="button" id="fbCancel">Cancel</button>
+      <button class="primary-btn" type="submit">Send feedback</button>
+    </div>
+  </form>
+
+  <details class="checks hidden" id="checks">
+    <summary>Shield &amp; automated checks</summary>
+    <ul id="warnings"></ul>
+    <p class="shield-label">Exactly what was sent to the AI model:</p>
+    <pre class="sent" id="sentToModel" dir="auto"></pre>
+  </details>
+
+  <section class="history">
+    <div class="history-head">
+      <h2>History <span>this browser session only · stored masked</span></h2>
+      <button class="small-btn" id="clearHistoryBtn">Clear history</button>
+    </div>
+    <div class="history-list" id="historyList"><p class="empty">No translations yet.</p></div>
+  </section>
+</div>
+
+<script>
+const LANG_NAMES = { en: "English", ur: "Urdu", "ur-Latn": "Roman Urdu" };
+const BIDI_ISOLATES = /[⁦-⁩]/g;
+const DEBOUNCE_MS = 700;
+
+const $ = (id) => document.getElementById(id);
+const input = $("input"), output = $("output"), sourceLang = $("sourceLang");
+
+let controller = null;
+let debounceTimer = null;
+let lastRequestKey = "";
+let lastResult = null;
+
+function direction() {
+  const src = sourceLang.value;
+  return src === "auto" ? "auto" : src === "en" ? "en-ur" : "ur-en";
+}
+
+function setTargetLabel(target) {
+  $("targetLabel").textContent = LANG_NAMES[target];
+}
+
+function setOutput(text, { placeholder = false, pending = false, lang = null } = {}) {
+  output.textContent = text;
+  output.classList.toggle("placeholder", placeholder);
+  output.classList.toggle("pending", pending);
+  if (lang) {
+    output.setAttribute("dir", lang === "ur" ? "rtl" : "ltr");
+    output.setAttribute("lang", lang);
+  } else {
+    output.removeAttribute("dir");
+  }
+}
+
+function resetResult() {
+  $("resultMeta").textContent = "";
+  $("detected").textContent = "";
+  ["checks", "privacyStatus", "feedbackRow", "feedbackForm"].forEach((id) => $(id).classList.add("hidden"));
+  $("error").textContent = "";
+  lastResult = null;
+}
+
+function scheduleTranslate() {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(translate, DEBOUNCE_MS);
+}
+
+async function translate() {
+  clearTimeout(debounceTimer);
+  const text = input.value.trim();
+  const dir = direction();
+  const key = dir + "\u0000" + text;
+  if (key === lastRequestKey) return;
+  lastRequestKey = key;
+
+  if (controller) controller.abort();
+  if (!text) {
+    resetResult();
+    setOutput("Translation", { placeholder: true });
+    return;
+  }
+
+  controller = new AbortController();
+  const signal = controller.signal;
+  $("error").textContent = "";
+  setOutput(output.classList.contains("placeholder") ? "" : output.textContent, { pending: true, lang: output.getAttribute("lang") });
+
+  let streamed = "";
+  let started = false;
+  try {
+    const res = await fetch("/translate/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, direction: dir }),
+      signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(typeof data.detail === "string" ? data.detail : "Request failed (" + res.status + ")");
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        if (!frame.startsWith("data: ")) continue;
+        const event = JSON.parse(frame.slice(6));
+
+        if (event.type === "meta") {
+          setTargetLabel(event.target_lang);
+          $("detected").textContent = event.detected ? LANG_NAMES[event.source_lang] + " — detected" : "";
+          output.setAttribute("dir", event.target_lang === "ur" ? "rtl" : "ltr");
+          output.setAttribute("lang", event.target_lang);
+        } else if (event.type === "delta") {
+          streamed += event.text;
+          if (!started && streamed.trim()) started = true;
+          if (started) setOutput(streamed.trimStart(), { pending: true, lang: output.getAttribute("lang") });
+        } else if (event.type === "done") {
+          showResult(event);
+        } else if (event.type === "error") {
+          throw new Error(event.message);
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    lastRequestKey = "";
+    output.classList.remove("pending");
+    $("error").textContent = err.message;
+  }
+}
+
+function showResult(r) {
+  lastResult = r;
+  setOutput(r.translated_text, { lang: r.target_lang });
+
+  const score = r.feedback.score;
+  const cls = score >= 80 ? "good" : score >= 50 ? "warn" : "bad";
+  const meta = $("resultMeta");
+  meta.innerHTML = "";
+  const badge = document.createElement("span");
+  badge.className = "badge " + cls;
+  badge.textContent = "Quality " + score;
+  meta.appendChild(badge);
+  if (r.security_flag) {
+    const flag = document.createElement("span");
+    flag.className = "badge bad";
+    flag.textContent = "Flagged";
+    flag.title = "Source contained instruction-like text";
+    meta.appendChild(document.createTextNode(" "));
+    meta.appendChild(flag);
+  }
+  meta.appendChild(document.createTextNode(" " + (r.cached ? "cached" : (r.latency_ms / 1000).toFixed(1) + "s")));
+
+  const list = $("warnings");
+  list.innerHTML = "";
+  r.feedback.warnings.forEach((w) => {
+    const li = document.createElement("li");
+    li.textContent = w;
+    list.appendChild(li);
+  });
+  $("sentToModel").textContent = r.sent_to_model || "";
+  $("checks").classList.remove("hidden");
+  showPrivacyStatus(r);
+  resetFeedback();
+  $("feedbackRow").classList.remove("hidden");
+  loadHistory();
+}
+
+function showPrivacyStatus(r) {
+  const p = r.privacy;
+  $("psProtected").textContent = p.protected_count
+    ? p.protected_count + " protected (" + p.protected_types.join(", ") + ")"
+    : "No sensitive values detected";
+  const integrity = $("psIntegrity");
+  integrity.className = "status-item" + (r.integrity.ok ? "" : " bad");
+  integrity.textContent = r.integrity.ok ? "Integrity verified" : "Integrity check failed — review before sending";
+  integrity.title = r.integrity.problems.join("; ");
+  $("privacyStatus").classList.remove("hidden");
+}
+
+// --- Feedback (stored masked; reviewed before it can become an example) ---
+function resetFeedback() {
+  $("upBtn").setAttribute("aria-pressed", "false");
+  $("downBtn").setAttribute("aria-pressed", "false");
+  $("feedbackStatus").textContent = "";
+  $("feedbackForm").classList.add("hidden");
+  $("feedbackForm").reset();
+}
+
+async function sendFeedback(rating, details = {}) {
+  if (!lastResult) return;
+  const status = $("feedbackStatus");
+  try {
+    const res = await fetch("/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ history_id: lastResult.history_id, rating, ...details }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not save feedback");
+    $("upBtn").setAttribute("aria-pressed", String(rating === 1));
+    $("downBtn").setAttribute("aria-pressed", String(rating === -1));
+    $("feedbackForm").classList.add("hidden");
+    status.textContent = "Thanks, saved for review (sensitive values masked).";
+  } catch (err) {
+    status.textContent = err.message;
+  }
+}
+
+$("upBtn").addEventListener("click", () => sendFeedback(1));
+$("downBtn").addEventListener("click", () => {
+  $("feedbackForm").classList.toggle("hidden");
+  $("fbCategory").focus();
+});
+$("fbCancel").addEventListener("click", () => $("feedbackForm").classList.add("hidden"));
+$("feedbackForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  sendFeedback(-1, {
+    category: $("fbCategory").value || null,
+    comment: $("fbComment").value.trim() || null,
+    correction: $("fbCorrection").value.trim() || null,
+  });
+});
+
+async function loadFeedbackCategories() {
+  try {
+    const categories = await (await fetch("/feedback/categories")).json();
+    const select = $("fbCategory");
+    select.innerHTML = '<option value="">What went wrong? (optional)</option>';
+    categories.forEach((c) => {
+      const option = document.createElement("option");
+      option.value = c.key;
+      option.textContent = c.label;
+      select.appendChild(option);
+    });
+  } catch {
+    /* the form still works without categories */
+  }
+}
+
+// --- Events ---
+input.addEventListener("input", () => {
+  $("charCount").textContent = input.value.length + " / 5000";
+  scheduleTranslate();
+});
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    lastRequestKey = "";
+    translate();
+  }
+});
+sourceLang.addEventListener("change", () => {
+  if (sourceLang.value !== "auto") setTargetLabel(sourceLang.value === "en" ? "ur" : "en");
+  translate();
+});
+$("swapBtn").addEventListener("click", () => {
+  const target = lastResult ? lastResult.target_lang
+    : ($("targetLabel").textContent === "Urdu" ? "ur" : "en");
+  if (lastResult) input.value = lastResult.translated_text;
+  sourceLang.value = target;
+  setTargetLabel(target === "en" ? "ur" : "en");
+  $("charCount").textContent = input.value.length + " / 5000";
+  translate();
+});
+$("clearBtn").addEventListener("click", () => {
+  input.value = "";
+  $("charCount").textContent = "0 / 5000";
+  translate();
+  input.focus();
+});
+$("copyBtn").addEventListener("click", async () => {
+  if (!lastResult) return;
+  try {
+    await navigator.clipboard.writeText(lastResult.translated_text.replace(BIDI_ISOLATES, ""));
+    $("copyBtn").textContent = "Copied";
+    setTimeout(() => ($("copyBtn").textContent = "Copy"), 1200);
+  } catch {
+    $("error").textContent = "Could not copy to clipboard.";
+  }
+});
+
+// --- History (scoped to this session by a cookie on the server) ---
+async function loadHistory() {
+  const listEl = $("historyList");
+  try {
+    const res = await fetch("/history?limit=50");
+    const rows = await res.json();
+    listEl.innerHTML = "";
+    if (!rows.length) {
+      listEl.innerHTML = '<p class="empty">No translations yet.</p>';
+      return;
+    }
+    rows.forEach((r) => {
+      const item = document.createElement("button");
+      item.className = "history-item";
+      item.type = "button";
+
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const when = new Date(r.created_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      meta.textContent = LANG_NAMES[r.source_lang] + " → " + LANG_NAMES[r.target_lang] + " · " + when
+        + (r.protected_types.length ? " · masked: " + r.protected_types.join(", ") : "")
+        + (r.integrity_ok ? "" : " · integrity failed")
+        + (r.security_flag ? " · flagged" : "");
+
+      const src = document.createElement("div");
+      src.className = "h-text";
+      src.dir = r.source_lang === "ur" ? "rtl" : "ltr";
+      src.textContent = r.masked_source;
+
+      const tgt = document.createElement("div");
+      tgt.className = "h-text";
+      tgt.dir = r.target_lang === "ur" ? "rtl" : "ltr";
+      tgt.textContent = r.masked_output;
+
+      item.append(meta, src, tgt);
+      item.addEventListener("click", () => {
+        // History only has masked text, so show it as-is instead of re-translating.
+        if (controller) controller.abort();
+        resetResult();
+        input.value = r.masked_source;
+        sourceLang.value = r.source_lang === "en" ? "en" : "ur";
+        setTargetLabel(r.target_lang);
+        lastRequestKey = direction() + "\u0000" + r.masked_source.trim();
+        setOutput(r.masked_output, { lang: r.target_lang });
+        $("charCount").textContent = input.value.length + " / 5000";
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      });
+      listEl.appendChild(item);
+    });
+  } catch {
+    listEl.innerHTML = '<p class="empty">Could not load history.</p>';
+  }
+}
+
+$("clearHistoryBtn").addEventListener("click", async () => {
+  await fetch("/history", { method: "DELETE" });
+  loadHistory();
+});
+
+loadHistory();
+loadFeedbackCategories();
+input.focus();
+</script>
+</body>
+</html>
