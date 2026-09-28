@@ -18,11 +18,20 @@ communication (SMS alerts, app messages, support chats, complaints). It is built
   real values.
 - **Curated example bank ("cold samples").** For each input, the 3 most relevant approved
   Pakistani banking examples are included in the prompt.
-- **Fully automatic, conservative self-improvement.** 👍/👎 feedback (with an optional
-  category, comment or correction) is stored masked. The prompt and example bank never
-  change from one piece of feedback. Only once the same issue has recurred across
-  `min_independent_examples` (default 3) independent sessions/messages does the server
-  apply the fix itself — no dashboard, no human in the loop.
+- **Conservative, review-gated self-improvement.** 👍/👎 feedback (with an optional category,
+  comment or correction) is stored masked. The prompt and example bank never change from one
+  piece of feedback — a pattern only becomes a *proposal* once it has recurred across
+  `min_independent_examples` (default 3) independent sessions/messages, and even then it only
+  takes effect once an admin approves it at `/admin`.
+- **In-line correction.** The translated output can be edited directly (an "Edit" button next
+  to Copy) instead of using the separate 👎 form — both paths feed the same review-gated
+  learning loop, tagged by `source: "inline"` vs `"form"`.
+- **Traceable context.** Every history row records which `model` and `knowledge_version`
+  (a hash of `knowledge/prompt.json` + `cold_samples.json`'s mtimes) actually served it, so
+  context stays auditable across a model swap or fallback. `POST /context/preview` shows the
+  exact prompt + examples a translation would get, without calling the model.
+- **Telemetry.** Prometheus metrics at `/metrics` (volume, latency, quality, cache hits,
+  integrity failures, security flags, errors, fallbacks) with a ready-made Grafana dashboard.
 - **Editable prompt.** `knowledge/prompt.json` holds the prompt in sections: natural banking
   language, code-switching, terminology, protected tokens, formatting and security.
 - **Also:** language detection without AI (English, Urdu, Roman Urdu), streaming output,
@@ -40,7 +49,8 @@ input ─► detect language (regex, no AI)
       ─► local integrity check (placeholders exactly once, no invented values, Urdu script)
             └─ fails? flag it in the response; the model is not called again
       ─► restore values locally (times/dates localized, bidi-isolated for RTL)
-      ─► heuristic checks ─► save MASKED source + MASKED output to session history
+      ─► heuristic checks ─► save MASKED source + MASKED output + model + knowledge_version
+         to session history, and record Prometheus metrics
 ```
 
 ## Privacy model
@@ -92,39 +102,38 @@ How examples are chosen for a prompt:
 Both files reload automatically when they change, with no restart needed. You can hand-edit
 either file at any time — the server picks up changes on the next request.
 
-## Automatic, conservative self-improvement
+## Conservative, review-gated self-improvement
 
-**Rule: a single feedback item never changes future behavior.** Example selection and the
-prompt depend only on the knowledge files, and feedback never feeds into them directly.
+**Rule: a single feedback item never changes future behavior, and neither does an unreviewed
+one.** Example selection and the prompt depend only on the knowledge files; feedback never
+feeds into them directly, and nothing is ever applied without an admin decision.
 
-1. **Monitor.** Every 👍/👎 is stored with masked text only (category, comment, correction).
-2. **Detect recurring patterns.** Right after each new feedback item is stored, the server
-   groups feedback from the last `window_days` and looks for patterns that have at least
-   `min_independent_examples` independent reports. "Independent" means different sessions,
-   and for cross-message patterns also different messages, so one person repeating a
-   complaint counts once.
+1. **Monitor.** Every 👍/👎 or in-line edit is stored with masked text only (category, comment,
+   correction, and whether it came from the in-line editor or the form — see `source`).
+2. **Detect recurring patterns.** `compute_proposals()` groups feedback from the last
+   `window_days` and looks for patterns that have at least `min_independent_examples`
+   independent reports. "Independent" means different sessions, and for cross-message
+   patterns also different messages, so one person repeating a complaint counts once.
 
-   | Pattern | Automatic action |
+   | Pattern | Proposed action |
    |---|---|
    | The same 👎 category across independent messages | Enable its pre-written rule from `issue_rules` |
    | An example keeps appearing in badly rated translations (👎 > 2 × 👍) | Disable that example |
    | The same message is independently corrected | Add the best-supported correction as a new example |
    | The same message and output are independently approved | Add it as a new example |
 
-3. **Apply automatically, once, with validation.** The moment a pattern crosses the
-   threshold, the server applies it itself:
-   - A new example must pass local validation (no real values leaked, matching placeholders
-     across languages) before it's added. If every candidate correction fails validation,
-     nothing is added — the evidence is not silently discarded, but it isn't guessed either.
-   - Each pattern is applied **at most once**: applying it records a decision, and only
-     evidence created after that decision counts toward proposing it again. The same votes
-     can't reapply themselves.
-   - There is no manual approval step and no dashboard — this automatic application *is*
-     the safeguard, gated purely on independent-evidence volume plus local validation.
+3. **Review, then apply.** A pattern that crosses the threshold shows up at `GET
+   /admin/proposals` and waits there:
+   - `POST /admin/proposals/{key}/approve` applies it — a new example still must pass local
+     validation (no real values leaked, matching placeholders across languages) first; if
+     every candidate fails, the endpoint returns an error and nothing is added.
+   - `POST /admin/proposals/{key}/reject` dismisses it without applying it.
+   - Either decision is recorded **once**: only evidence created after that decision counts
+     toward proposing the same key again, so the same votes can't reapply or re-reject
+     themselves.
 
-`POST /feedback` returns a `self_improved` field listing anything that was just applied as a
-direct result of that specific report (empty on almost every call, since most reports don't
-push a pattern over the threshold).
+`POST /feedback` returns `pending_review_count` — how many proposals currently await a
+decision — purely for visibility; the submission itself never changes anything.
 
 ## Setup and run
 
@@ -145,6 +154,8 @@ Open `http://localhost:8000/`. API docs are at `/docs`.
 | `OPENROUTER_FALLBACK_MODELS` | `nvidia/nemotron-3-ultra-550b-a55b:free,google/gemma-4-26b-a4b-it:free` | Free fallbacks when the primary is rate-limited (still one HTTP request) |
 | `TRANSLATOR_DB_PATH` | `translator.db` | SQLite file |
 | `KNOWLEDGE_DIR` | `./knowledge` | Location of `prompt.json` and `cold_samples.json` |
+| `ADMIN_TOKEN` | — | Gates `/admin/*` (header `X-Admin-Token`). Unset disables the admin surface entirely (fails closed) |
+| `WEB_CONCURRENCY` | `1` | uvicorn worker count (Docker/Procfile/render.yaml); see Scalability below |
 
 ## API
 
@@ -153,24 +164,66 @@ Open `http://localhost:8000/`. API docs are at `/docs`.
 | `POST /translate/stream` | Server-sent events: `meta`, `delta`s, then `done` or `error`. Exactly one model call happens here (zero on a cache hit) |
 | `POST /translate` | The final `done` object as JSON |
 | `POST /shield` | Masked preview, with no model call |
-| `GET /history`, `DELETE /history` | This session's masked history |
+| `POST /context/preview` | The exact system prompt + examples a translation would get, with no model call |
+| `GET /history`, `DELETE /history` | This session's masked history (now includes `model`, `knowledge_version`, `latency_ms`, `cached`, `human_feedback`) |
 | `GET /feedback/categories` | Issue categories from `prompt.json` |
-| `POST /feedback` | `{history_id, rating: 1\|-1, category?, comment?, correction?}` for this session's items only; may trigger automatic self-improvement (see `self_improved` in the response) |
+| `POST /feedback` | `{history_id, rating: 1\|-1, category?, comment?, correction?, source?: "form"\|"inline"}` for this session's items only. Never applies anything itself — see `pending_review_count` in the response |
+| `GET /admin/proposals` *(admin)* | Proposals currently past the independent-evidence threshold, awaiting a decision |
+| `POST /admin/proposals/{key}/approve` *(admin)* | Applies one proposal (validated first) |
+| `POST /admin/proposals/{key}/reject` *(admin)* | Dismisses one proposal without applying it |
+| `GET /admin/history` *(admin)* | Masked history across every session, each with any human feedback joined in |
+| `GET /admin/health` *(admin)* | The same numbers `/metrics` exposes, as plain JSON |
+| `GET /metrics` | Prometheus scrape endpoint |
+
+*(admin)* endpoints require header `X-Admin-Token: <ADMIN_TOKEN>`. The admin review page is
+at `/admin` (prompts for the token once, keeps it in `localStorage`).
 
 A `done` object includes:
 - `translated_text` (display-ready; strip `U+2066`–`U+2069` for SMS)
 - `sent_to_model`, `history_id`, `samples_used`, `model`, `latency_ms`, `cached`
 - `integrity {ok, problems}`
+- `context {model, knowledge_version, samples_used}`
 - `privacy {protected_count, protected_types, originals_sent_to_model, history_masked}`
 - `security_flag`, `feedback {score, warnings}`
 
+## Telemetry
+
+`telemetry.py` defines Prometheus metrics (translation volume by language direction,
+latency, quality score, cache hits, integrity failures, security flags, translation errors,
+model-fallback count), recorded once per translation in `run_translation()`. `GET /metrics`
+exposes them; `GET /admin/health` reads the same values back as plain JSON.
+
+`docker-compose.yml` runs Prometheus + Grafana (the app itself runs on the host via
+`uvicorn`, scraped at `host.docker.internal:8000/metrics`):
+
+```bash
+docker compose up -d
+# Prometheus:  http://localhost:9090
+# Grafana:     http://localhost:3000  (dashboard auto-provisioned from grafana/dashboards/)
+```
+
+The dashboard includes a "Requests per Minute (24h)" panel for spotting peak usage periods.
+
 ## Deploy (free)
 
-`Dockerfile`, `Procfile` and `render.yaml` are included. Set `OPENROUTER_API_KEY` as a secret.
-`knowledge/` ships with the app and is read/written on the server's own disk — on hosts with
-ephemeral disks, anything the server has automatically learned is lost on redeploy, so
-periodically copy `knowledge/cold_samples.json` and `knowledge/prompt.json` back into the
-repo if you want to keep it.
+`Dockerfile`, `Procfile` and `render.yaml` are included. Set `OPENROUTER_API_KEY` (and, if you
+want the admin view in production, `ADMIN_TOKEN`) as secrets. `knowledge/` ships with the app
+and is read/written on the server's own disk — on hosts with ephemeral disks, anything an
+approved proposal has changed is lost on redeploy, so periodically copy
+`knowledge/cold_samples.json` and `knowledge/prompt.json` back into the repo if you want to
+keep it.
+
+### Scalability
+
+- SQLite runs in **WAL mode** (`PRAGMA journal_mode=WAL` in `db()`) with a `busy_timeout`, so
+  concurrent readers and a writer don't produce "database is locked" errors — the one real
+  correctness bottleneck the single-connection-per-request design had under load.
+- `WEB_CONCURRENCY` (default `1`) sets the uvicorn worker count. Raising it is safe: the
+  source of truth (SQLite + `knowledge/*.json`) is shared across processes. Each worker does
+  keep its own in-memory response cache and model-fallback cooldown, so with N workers the
+  effective cache hit rate is somewhat lower and fallback cooldowns are tracked independently
+  — not a correctness issue, just slightly less globally coordinated. Deliberately not adding
+  a shared cache (Redis, etc.) for this — not needed at this scale.
 
 ## Limitations
 
@@ -186,4 +239,7 @@ repo if you want to keep it.
   history. For the same reason, "independent" reports are only as independent as sessions
   are: someone clearing their cookies repeatedly could in principle simulate several
   sessions. Local validation (no real values, matching placeholders) is the safeguard against
-  that producing a bad automatic example, not a guarantee against gaming the vote count.
+  a bad proposal passing validation, not a guarantee against gaming the vote count — the admin
+  approval step is the actual safeguard against a gamed proposal being applied.
+- **Admin auth is a single shared token**, not per-reviewer accounts — fine for one or a
+  small trusted team, not for attributing which specific admin approved what.

@@ -10,12 +10,14 @@ masked-only history.
 Privacy invariant: original sensitive values live only in memory for the
 duration of one request. History, feedback and the cache hold masked text.
 
-Self-improvement is fully automatic and conservative: feedback is monitored,
-and a pattern only changes the prompt or example bank once it has recurred
-across enough independent sessions/messages (see compute_proposals() and
-auto_improve()). There is no admin UI; every change is applied by the server
-itself when the evidence threshold is met, and is idempotent via
-proposal_decisions so the same evidence can't reapply itself repeatedly.
+Self-improvement is conservative and review-gated: feedback is monitored, and a
+pattern only becomes a *proposal* once it has recurred across enough independent
+sessions/messages (see compute_proposals()). A proposal only changes the prompt
+or example bank once an admin approves it via POST /admin/proposals/{key}/approve
+(see apply_proposal()); decisions are idempotent via proposal_decisions so the
+same evidence can't reapply itself repeatedly. Every masked_history row also
+records which model and knowledge_version actually served it, so context stays
+traceable across a model swap or fallback (see run_translation()).
 """
 
 import hashlib
@@ -32,10 +34,23 @@ from typing import AsyncIterator, Callable, Dict, List, Literal, NamedTuple, Opt
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from prometheus_client import make_asgi_app
+
+from telemetry import (
+    TRANSLATIONS,
+    LATENCY,
+    CACHE_HITS,
+    INTEGRITY_FAILURES,
+    SECURITY_FLAGS,
+    QUALITY,
+    TRANSLATION_ERRORS,
+    MODEL_FALLBACK_TOTAL,
+    snapshot as telemetry_snapshot,
+)
 
 load_dotenv()
 
@@ -61,6 +76,9 @@ OPENROUTER_FALLBACK_MODELS = [
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_REFERRER = os.environ.get("OPENROUTER_REFERRER", "http://localhost")
 OPENROUTER_APP_TITLE = os.environ.get("OPENROUTER_APP_TITLE", "Urdu Banking Translator")
+
+# Shared secret gating /admin/*; unset means the admin surface is disabled (fails closed).
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 
 MAX_INPUT_CHARS = 5000
 MAX_SAMPLES_IN_PROMPT = 3
@@ -88,6 +106,8 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Urdu Banking Translator", version="5.0.0", lifespan=lifespan)
+
+app.mount("/metrics", make_asgi_app())
 
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -126,7 +146,25 @@ def db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA secure_delete = ON")  # zero out deleted rows on disk
+    # WAL lets readers and a writer proceed concurrently instead of "database is locked";
+    # busy_timeout makes a genuinely concurrent writer wait briefly instead of erroring.
+    # Needed once multiple uvicorn workers (WEB_CONCURRENCY) share this one SQLite file.
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
+
+
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]) -> None:
+    """Adds any column in `columns` ({name: 'name TYPE'}) missing from an existing table.
+
+    CREATE TABLE IF NOT EXISTS is a no-op on a table that already exists, so a schema
+    added after the table was first created (e.g. on an existing translator.db file)
+    needs an explicit ALTER TABLE — this is that migration, run once at startup.
+    """
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, ddl in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
 def init_db() -> None:
@@ -150,6 +188,10 @@ def init_db() -> None:
                 warnings TEXT NOT NULL,
                 integrity_ok INTEGER NOT NULL,
                 security_flag INTEGER NOT NULL,
+                model TEXT,
+                knowledge_version TEXT,
+                latency_ms INTEGER,
+                cached INTEGER NOT NULL DEFAULT 0,
                 created_at REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_masked_history_session ON masked_history(session_id, id);
@@ -162,6 +204,7 @@ def init_db() -> None:
                 category TEXT,
                 comment TEXT,
                 correction TEXT,
+                source TEXT NOT NULL DEFAULT 'form',
                 masked_source TEXT NOT NULL,
                 masked_output TEXT NOT NULL,
                 source_lang TEXT NOT NULL,
@@ -169,6 +212,7 @@ def init_db() -> None:
                 sample_ids TEXT NOT NULL,
                 created_at REAL NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_feedback_history ON feedback(history_id);
 
             CREATE TABLE IF NOT EXISTS proposal_decisions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -178,6 +222,13 @@ def init_db() -> None:
             );
             """
         )
+        _ensure_columns(conn, "masked_history", {
+            "model": "model TEXT",
+            "knowledge_version": "knowledge_version TEXT",
+            "latency_ms": "latency_ms INTEGER",
+            "cached": "cached INTEGER NOT NULL DEFAULT 0",
+        })
+        _ensure_columns(conn, "feedback", {"source": "source TEXT NOT NULL DEFAULT 'form'"})
         conn.commit()
         if legacy:
             conn.execute("VACUUM")  # rewrite the file so dropped plaintext is not recoverable
@@ -189,7 +240,8 @@ def save_history(session_id: str, record: Dict) -> int:
         record["source_lang"], record["target_lang"], record["masked_source"], record["masked_output"],
         json.dumps(record["protected_types"]), json.dumps(record["sample_ids"]), record["score"],
         json.dumps(record["warnings"], ensure_ascii=False), int(record["integrity_ok"]),
-        int(record["security_flag"]), now,
+        int(record["security_flag"]), record.get("model"), record.get("knowledge_version"),
+        record.get("latency_ms"), int(record.get("cached", False)), now,
     )
     source = record["masked_source"]
 
@@ -208,14 +260,16 @@ def save_history(session_id: str, record: Dict) -> int:
             conn.execute(
                 "UPDATE masked_history SET source_lang = ?, target_lang = ?, masked_source = ?, "
                 "masked_output = ?, protected_types = ?, sample_ids = ?, score = ?, warnings = ?, "
-                "integrity_ok = ?, security_flag = ?, created_at = ? WHERE id = ?",
+                "integrity_ok = ?, security_flag = ?, model = ?, knowledge_version = ?, latency_ms = ?, "
+                "cached = ?, created_at = ? WHERE id = ?",
                 (*values, row_id),
             )
         else:
             row_id = conn.execute(
                 "INSERT INTO masked_history (source_lang, target_lang, masked_source, masked_output, "
-                "protected_types, sample_ids, score, warnings, integrity_ok, security_flag, created_at, "
-                "session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "protected_types, sample_ids, score, warnings, integrity_ok, security_flag, model, "
+                "knowledge_version, latency_ms, cached, created_at, session_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (*values, session_id),
             ).lastrowid
             conn.execute(
@@ -234,7 +288,33 @@ def _history_row(row: sqlite3.Row) -> Dict:
         item[field] = json.loads(item[field])
     item["integrity_ok"] = bool(item["integrity_ok"])
     item["security_flag"] = bool(item["security_flag"])
+    item["cached"] = bool(item.get("cached") or 0)
     return item
+
+
+def _feedback_row(row: sqlite3.Row) -> Dict:
+    item = dict(row)
+    item.pop("session_id", None)
+    item["sample_ids"] = json.loads(item["sample_ids"])
+    return item
+
+
+def _attach_feedback(conn: sqlite3.Connection, items: List[Dict]) -> List[Dict]:
+    """Joins each history item's human feedback/corrections, for a full "what happened"
+    view (req 3) — a translation, any rating, and any edit, in one place."""
+    if not items:
+        return items
+    ids = [item["id"] for item in items]
+    rows = conn.execute(
+        f"SELECT * FROM feedback WHERE history_id IN ({','.join('?' * len(ids))}) ORDER BY id",
+        ids,
+    ).fetchall()
+    by_history: Dict[int, List[Dict]] = {}
+    for row in rows:
+        by_history.setdefault(row["history_id"], []).append(_feedback_row(row))
+    for item in items:
+        item["human_feedback"] = by_history.get(item["id"], [])
+    return items
 
 
 def fetch_history(session_id: str, limit: int) -> List[Dict]:
@@ -244,7 +324,7 @@ def fetch_history(session_id: str, limit: int) -> List[Dict]:
             "ORDER BY id DESC LIMIT ?",
             (session_id, time.time() - HISTORY_TTL_S, limit),
         ).fetchall()
-    return [_history_row(row) for row in rows]
+        return _attach_feedback(conn, [_history_row(row) for row in rows])
 
 
 def fetch_history_item(session_id: str, history_id: int) -> Dict:
@@ -252,9 +332,16 @@ def fetch_history_item(session_id: str, history_id: int) -> Dict:
         row = conn.execute(
             "SELECT * FROM masked_history WHERE id = ? AND session_id = ?", (history_id, session_id)
         ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Translation not found in this session.")
-    return _history_row(row)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Translation not found in this session.")
+        return _attach_feedback(conn, [_history_row(row)])[0]
+
+
+def fetch_all_history(limit: int) -> List[Dict]:
+    """Admin-only: history across every session, most recent first (see /admin/history)."""
+    with closing(db()) as conn:
+        rows = conn.execute("SELECT * FROM masked_history ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return _attach_feedback(conn, [_history_row(row) for row in rows])
 
 
 def clear_history(session_id: str) -> None:
@@ -847,6 +934,7 @@ def record_serving_model(model: Optional[str]) -> None:
     global _primary_cooldown_until
     if model and model.split(":")[0] != OPENROUTER_MODEL.split(":")[0]:
         _primary_cooldown_until = time.monotonic() + PRIMARY_COOLDOWN_S
+        MODEL_FALLBACK_TOTAL.inc()
 
 
 async def stream_openrouter(messages: List[Dict], max_tokens: int) -> AsyncIterator[Tuple[str, Optional[str]]]:
@@ -1020,6 +1108,12 @@ async def run_translation(text: str, direction: str, session_id: str) -> AsyncIt
                                          integrity, security_flag)
     protected_types = sorted({e.type for e in sensitive_entities(entities)})
     sample_ids = [s["id"] for s in samples]
+    latency_s = time.perf_counter() - started
+    latency_ms = round(latency_s * 1000)
+    # Identifies exactly which knowledge/*.json content this translation used — the same
+    # value stays valid across a model swap or fallback, since context is plain JSON, not
+    # tied to any model (see the module docstring and apply_proposal()).
+    knowledge_version = f"{knowledge.version[0]}:{knowledge.version[1]}"
 
     history_id = save_history(session_id, {
         "source_lang": source_lang,
@@ -1032,7 +1126,21 @@ async def run_translation(text: str, direction: str, session_id: str) -> AsyncIt
         "warnings": warnings,
         "integrity_ok": integrity.ok,
         "security_flag": security_flag,
+        "model": model,
+        "knowledge_version": knowledge_version,
+        "latency_ms": latency_ms,
+        "cached": bool(cached),
     })
+
+    TRANSLATIONS.labels(source_lang=source_lang, target_lang=target_lang).inc()
+    LATENCY.observe(latency_s)
+    QUALITY.observe(score)
+    if cached:
+        CACHE_HITS.inc()
+    if not integrity.ok:
+        INTEGRITY_FAILURES.inc()
+    if security_flag:
+        SECURITY_FLAGS.inc()
 
     yield {
         "type": "done",
@@ -1043,10 +1151,11 @@ async def run_translation(text: str, direction: str, session_id: str) -> AsyncIt
         "sent_to_model": masked_text,
         "model": model,
         "cached": bool(cached),
-        "latency_ms": round((time.perf_counter() - started) * 1000),
+        "latency_ms": latency_ms,
         "samples_used": sample_ids,
         "security_flag": security_flag,
         "integrity": {"ok": integrity.ok, "problems": integrity.problems},
+        "context": {"model": model, "knowledge_version": knowledge_version, "samples_used": sample_ids},
         "privacy": {
             "protected_count": len(sensitive_entities(entities)),
             "protected_types": protected_types,
@@ -1073,6 +1182,10 @@ class FeedbackRequest(BaseModel):
     category: Optional[str] = Field(None, max_length=40)
     comment: Optional[str] = Field(None, max_length=500)
     correction: Optional[str] = Field(None, max_length=MAX_INPUT_CHARS)
+    # "inline" = edited the output directly in place; "form" = the separate 👎 form.
+    # Pure signal for the admin view and compute_proposals() grouping — same table, same
+    # validation either way.
+    source: Literal["form", "inline"] = "form"
 
 
 def require_api_key() -> None:
@@ -1080,9 +1193,23 @@ def require_api_key() -> None:
         raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY is not set on the server.")
 
 
+def require_admin_token(request: Request) -> None:
+    if not ADMIN_TOKEN:
+        raise HTTPException(status_code=500, detail="ADMIN_TOKEN is not set on the server.")
+    if request.headers.get("X-Admin-Token") != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Missing or invalid admin token.")
+
+
 @app.get("/", include_in_schema=False)
 def root():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+
+@app.get("/admin", include_in_schema=False)
+def admin_page():
+    # The page itself is static; every data call it makes goes through the /admin/* JSON
+    # endpoints above, which require the X-Admin-Token header (require_admin_token()).
+    return FileResponse(os.path.join(STATIC_DIR, "admin.html"))
 
 
 @app.get("/health")
@@ -1102,6 +1229,29 @@ def preview_shield(payload: TranslateRequest) -> Dict:
             "protected_types": sorted({e.type for e in sensitive_entities(entities)})}
 
 
+@app.post("/context/preview")
+def preview_context(payload: TranslateRequest) -> Dict:
+    """Shows the exact context (system prompt + few-shot examples) a translation would get,
+    without calling the model — reuses select_samples()/build_messages() unchanged, so this
+    is guaranteed to match what run_translation() actually sends."""
+    text = payload.text.strip()
+    script_lang = detect_language(text)
+    target_lang = ("ur" if script_lang == "en" else "en") if payload.direction == "auto" \
+        else payload.direction.split("-")[1]
+    knowledge.refresh()
+    security_flag = detect_prompt_injection(text)
+    masked_text, _entities = shield(text, target_lang)
+    samples = select_samples(masked_text, script_lang, security_flag)
+    messages = build_messages(masked_text, script_lang, target_lang, samples)
+    return {
+        "target_lang": target_lang,
+        "knowledge_version": f"{knowledge.version[0]}:{knowledge.version[1]}",
+        "system_prompt": messages[0]["content"],
+        "samples_used": [s["id"] for s in samples],
+        "security_flag": security_flag,
+    }
+
+
 @app.post("/translate/stream")
 async def translate_stream(payload: TranslateRequest, request: Request) -> StreamingResponse:
     """Server-sent events: one `meta`, many `delta`s, then `done` or `error`.
@@ -1116,6 +1266,7 @@ async def translate_stream(payload: TranslateRequest, request: Request) -> Strea
             async for event in run_translation(payload.text, payload.direction, request.state.session_id):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except TranslationError as exc:
+            TRANSLATION_ERRORS.labels(status=str(exc.status)).inc()
             yield f"data: {json.dumps({'type': 'error', 'message': exc.message}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream",
@@ -1130,6 +1281,7 @@ async def translate(payload: TranslateRequest, request: Request) -> Dict:
             if event["type"] == "done":
                 return event
     except TranslationError as exc:
+        TRANSLATION_ERRORS.labels(status=str(exc.status)).inc()
         raise HTTPException(status_code=exc.status, detail=exc.message)
     raise HTTPException(status_code=502, detail="Translation did not complete.")
 
@@ -1155,10 +1307,13 @@ def feedback_categories() -> List[Dict[str, str]]:
 
 @app.post("/feedback")
 def submit_feedback(payload: FeedbackRequest, request: Request) -> Dict:
-    """Stores a rating for one of this session's translations, for monitoring only.
+    """Stores a rating (a 👍/👎, or an in-line edit — see `source`) for one of this
+    session's translations, for monitoring only.
 
-    A single rating never changes the prompt or the example bank; see compute_proposals().
-    Free text is masked before saving.
+    Nothing here changes the prompt or the example bank. A recurring pattern only becomes
+    a proposal (compute_proposals()) once independent evidence crosses the threshold, and
+    even then it only takes effect once an admin approves it (POST
+    /admin/proposals/{key}/approve, apply_proposal()). Free text is masked before saving.
     """
     session_id = request.state.session_id
     item = fetch_history_item(session_id, payload.history_id)
@@ -1171,30 +1326,31 @@ def submit_feedback(payload: FeedbackRequest, request: Request) -> Dict:
         conn.execute("DELETE FROM feedback WHERE session_id = ? AND history_id = ?",
                      (session_id, payload.history_id))
         conn.execute(
-            "INSERT INTO feedback (session_id, history_id, rating, category, comment, correction, "
+            "INSERT INTO feedback (session_id, history_id, rating, category, comment, correction, source, "
             "masked_source, masked_output, source_lang, target_lang, sample_ids, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, payload.history_id, payload.rating, category, comment or None, correction or None,
-             item["masked_source"], item["masked_output"], item["source_lang"], item["target_lang"],
-             json.dumps(item["sample_ids"]), time.time()),
+             payload.source, item["masked_source"], item["masked_output"], item["source_lang"],
+             item["target_lang"], json.dumps(item["sample_ids"]), time.time()),
         )
         conn.commit()
 
-    # Automatic and conservative: this only changes anything when the new evidence pushes
-    # some pattern's independent-example count over the threshold (see auto_improve()).
-    applied = auto_improve()
+    # Visibility only — nothing is applied here. See compute_proposals()/apply_proposal().
+    pending_review_count = len(compute_proposals())
     return {"status": "stored_for_monitoring", "stored": {"comment": comment, "correction": correction},
-            "self_improved": applied}
+            "pending_review_count": pending_review_count}
 
 
 # ---------------------------------------------------------------------------
-# Conservative learning
+# Conservative, review-gated learning
 #
 # Feedback is stored for monitoring only. A recurring pattern becomes a
-# *proposal* once it has been reported in enough independent examples
-# (distinct sessions AND distinct messages). Nothing changes until an admin
-# approves a proposal; the evidence and any new example are re-validated at
-# that moment. A single bad translation can therefore never change behavior.
+# *proposal* (compute_proposals()) once it has been reported in enough
+# independent examples (distinct sessions AND distinct messages). Nothing
+# changes until an admin approves a proposal via POST
+# /admin/proposals/{key}/approve (apply_proposal()); rejecting one is
+# POST /admin/proposals/{key}/reject. A single bad translation can therefore
+# never change behavior, and neither can an unreviewed one.
 # ---------------------------------------------------------------------------
 
 
@@ -1327,52 +1483,97 @@ def record_decision(key: str, decision: str) -> None:
         conn.commit()
 
 
-def auto_improve() -> List[Dict]:
-    """Applies proposals automatically, but only once independent evidence crosses the
-    threshold in compute_proposals(). No human review step exists: this IS the approval.
+def apply_proposal(proposal: Dict) -> Dict:
+    """Applies one proposal (as returned by compute_proposals()) and records the decision.
 
-    Called right after a feedback item is stored, i.e. exactly when new evidence could
-    exist. A single feedback item can never trigger a change by itself, because
-    compute_proposals() already requires >= min_independent_examples distinct
-    sessions (and, for cross-message patterns, distinct messages) before a pattern is
-    even returned as a proposal. Each proposal key is applied at most once: after
-    record_decision(), compute_proposals() only counts evidence newer than the decision,
-    so the same votes can't reapply themselves.
+    This is the one place a proposal is ever applied — always admin-triggered (see
+    POST /admin/proposals/{key}/approve). The per-kind logic and local validation are
+    unchanged from when this ran automatically: enabling a rule, disabling a bad example,
+    or adding a new curated example still requires the independent-evidence threshold
+    already enforced by compute_proposals(), and a new example still can't be added if
+    every candidate fails sample_errors() validation. record_decision() keeps this
+    idempotent: compute_proposals() only counts evidence newer than the last decision for
+    a given key, so approving/rejecting the same evidence twice is a no-op.
     """
-    applied = []
-    for proposal in compute_proposals():
-        key, kind, detail = proposal["key"], proposal["kind"], proposal["detail"]
+    key, kind, detail = proposal["key"], proposal["kind"], proposal["detail"]
 
-        if kind == "enable_rule":
-            prompt = dict(knowledge.prompt)
-            enabled = set(prompt.get("enabled_issue_rules", []))
-            if detail["rule_key"] not in enabled:
-                prompt["enabled_issue_rules"] = sorted(enabled | {detail["rule_key"]})
-                knowledge.save_prompt(prompt)
-            record_decision(key, "applied")
-            applied.append({"kind": kind, "key": key, "rule_key": detail["rule_key"]})
+    if kind == "enable_rule":
+        prompt = dict(knowledge.prompt)
+        enabled = set(prompt.get("enabled_issue_rules", []))
+        if detail["rule_key"] not in enabled:
+            prompt["enabled_issue_rules"] = sorted(enabled | {detail["rule_key"]})
+            knowledge.save_prompt(prompt)
+        record_decision(key, "applied")
+        return {"kind": kind, "key": key, "rule_key": detail["rule_key"]}
 
-        elif kind == "disable_sample":
-            sample_id = detail["sample"]["id"]
-            samples = knowledge.public_samples()
-            for sample in samples:
-                if sample["id"] == sample_id and sample.get("approved", False):
-                    sample.update(approved=False, updated_at=round(time.time(), 3))
-            knowledge.save_samples(samples)
-            record_decision(key, "applied")
-            applied.append({"kind": kind, "key": key, "sample_id": sample_id})
+    if kind == "disable_sample":
+        sample_id = detail["sample"]["id"]
+        samples = knowledge.public_samples()
+        for sample in samples:
+            if sample["id"] == sample_id and sample.get("approved", False):
+                sample.update(approved=False, updated_at=round(time.time(), 3))
+        knowledge.save_samples(samples)
+        record_decision(key, "applied")
+        return {"kind": kind, "key": key, "sample_id": sample_id}
 
-        else:  # fix_example / good_example: add a new curated example
-            chosen = next((c for c in detail["candidates"] if not c["errors"]), None)
-            if chosen is None:
-                # Every candidate failed local validation (e.g. still had a real value in
-                # free text); never guess. Recorded so this exact evidence isn't retried
-                # every time, but a differently worded correction can still propose again.
-                record_decision(key, "invalid")
-                continue
-            samples = knowledge.public_samples()
-            if chosen["draft"]["id"] not in {s["id"] for s in samples}:
-                knowledge.save_samples(samples + [chosen["draft"]])
-            record_decision(key, "applied")
-            applied.append({"kind": kind, "key": key, "sample_id": chosen["draft"]["id"]})
-    return applied
+    # fix_example / good_example: add a new curated example
+    chosen = next((c for c in detail["candidates"] if not c["errors"]), None)
+    if chosen is None:
+        # Every candidate failed local validation (e.g. still had a real value in free
+        # text); never guess. Recorded so this exact evidence isn't retried every time,
+        # but a differently worded correction can still propose again.
+        record_decision(key, "invalid")
+        raise HTTPException(status_code=422, detail="Every candidate for this proposal failed local "
+                            "validation (e.g. an unmasked value in the correction); nothing was applied.")
+    samples = knowledge.public_samples()
+    if chosen["draft"]["id"] not in {s["id"] for s in samples}:
+        knowledge.save_samples(samples + [chosen["draft"]])
+    record_decision(key, "applied")
+    return {"kind": kind, "key": key, "sample_id": chosen["draft"]["id"]}
+
+
+# ---------------------------------------------------------------------------
+# Admin: proposal review, cross-session history, health snapshot.
+#
+# Everything below requires the ADMIN_TOKEN header (require_admin_token). This is the
+# only place apply_proposal() is ever called — the human decision compute_proposals()
+# and apply_proposal() were built to wait for.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/admin/proposals", dependencies=[Depends(require_admin_token)])
+def admin_list_proposals() -> List[Dict]:
+    """Every proposal currently past the independent-evidence threshold and awaiting
+    a decision (compute_proposals() already excludes anything already applied/rejected)."""
+    return compute_proposals()
+
+
+@app.post("/admin/proposals/{key}/approve", dependencies=[Depends(require_admin_token)])
+def admin_approve_proposal(key: str) -> Dict:
+    proposal = next((p for p in compute_proposals() if p["key"] == key), None)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="No pending proposal with that key — it may "
+                            "already be decided, or no longer have enough independent evidence.")
+    return apply_proposal(proposal)
+
+
+@app.post("/admin/proposals/{key}/reject", dependencies=[Depends(require_admin_token)])
+def admin_reject_proposal(key: str) -> Dict:
+    """Rejects a proposal without applying it. The evidence behind it is not retried until
+    genuinely new feedback arrives, exactly like the "applied" path (record_decision())."""
+    record_decision(key, "rejected")
+    return {"status": "rejected", "key": key}
+
+
+@app.get("/admin/history", dependencies=[Depends(require_admin_token)])
+def admin_history(limit: int = 200) -> List[Dict]:
+    """Translation history across every session (unlike the user-facing /history, which is
+    scoped to the caller's own session), each with its model/context and any feedback."""
+    return fetch_all_history(min(max(limit, 1), 500))
+
+
+@app.get("/admin/health", dependencies=[Depends(require_admin_token)])
+def admin_health() -> Dict:
+    """A plain-JSON system-health summary, read from the same Prometheus registry /metrics
+    exposes — works even if Grafana isn't running."""
+    return telemetry_snapshot()

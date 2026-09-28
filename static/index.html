@@ -9,15 +9,15 @@
 <link href="https://fonts.googleapis.com/css2?family=Noto+Nastaliq+Urdu:wght@400;600&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #f6f7fb;
-    --panel: #ffffff;
-    --border: #e2e5ec;
-    --text: #1c2033;
-    --muted: #6b7086;
-    --accent: #3457d5;
-    --good: #1a9e6b;
-    --warn: #b77b06;
-    --bad: #d1444e;
+    --bg: #f2f3f6;
+    --panel: #fbfbfc;
+    --border: #dee1e8;
+    --text: #202634;
+    --muted: #656d7e;
+    --accent: #2f5d8a;
+    --good: #15803d;
+    --warn: #b45309;
+    --bad: #b91c1c;
     --radius: 14px;
   }
   @media (prefers-color-scheme: dark) {
@@ -196,10 +196,16 @@
 
     <div class="pane output">
       <div class="out-text placeholder" id="output" aria-live="polite">Translation</div>
+      <textarea class="hidden" id="editArea" dir="auto" maxlength="5000" aria-label="Edit translation"></textarea>
       <div class="pane-footer">
         <span id="resultMeta"></span>
-        <div class="footer-actions">
+        <div class="footer-actions" id="outputActions">
+          <button class="small-btn" id="editBtn" title="Edit this translation directly">Edit</button>
           <button class="small-btn" id="copyBtn" title="Copy translation">Copy</button>
+        </div>
+        <div class="footer-actions hidden" id="editActions">
+          <button class="small-btn" id="editCancelBtn" type="button">Cancel</button>
+          <button class="primary-btn" id="editSaveBtn" type="button">Save correction</button>
         </div>
       </div>
     </div>
@@ -287,6 +293,7 @@ function resetResult() {
   ["checks", "privacyStatus", "feedbackRow", "feedbackForm"].forEach((id) => $(id).classList.add("hidden"));
   $("error").textContent = "";
   lastResult = null;
+  cancelEdit();
 }
 
 function scheduleTranslate() {
@@ -443,6 +450,41 @@ async function sendFeedback(rating, details = {}) {
     status.textContent = err.message;
   }
 }
+
+// --- In-line edit: correct the translation directly instead of the separate form ---
+const editArea = $("editArea");
+
+function startEdit() {
+  if (!lastResult) return;
+  editArea.value = lastResult.translated_text.replace(BIDI_ISOLATES, "");
+  editArea.setAttribute("dir", lastResult.target_lang === "ur" ? "rtl" : "ltr");
+  editArea.setAttribute("lang", lastResult.target_lang);
+  output.classList.add("hidden");
+  editArea.classList.remove("hidden");
+  $("outputActions").classList.add("hidden");
+  $("editActions").classList.remove("hidden");
+  editArea.focus();
+}
+
+function cancelEdit() {
+  editArea.classList.add("hidden");
+  output.classList.remove("hidden");
+  $("editActions").classList.add("hidden");
+  $("outputActions").classList.remove("hidden");
+}
+
+async function saveEdit() {
+  if (!lastResult) return;
+  const edited = editArea.value.trim();
+  const original = lastResult.translated_text.replace(BIDI_ISOLATES, "").trim();
+  cancelEdit();
+  if (!edited || edited === original) return;
+  await sendFeedback(-1, { correction: edited, source: "inline" });
+}
+
+$("editBtn").addEventListener("click", startEdit);
+$("editCancelBtn").addEventListener("click", cancelEdit);
+$("editSaveBtn").addEventListener("click", saveEdit);
 
 $("upBtn").addEventListener("click", () => sendFeedback(1));
 $("downBtn").addEventListener("click", () => {

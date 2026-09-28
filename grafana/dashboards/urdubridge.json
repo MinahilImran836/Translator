@@ -1,0 +1,206 @@
+{
+  "title": "UrduBridge — Translation Telemetry",
+  "uid": "urdubridge-telemetry",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-24h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total Translations",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "sum(translations_total)", "legendFormat": "translations", "refId": "A" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Average Latency (s, 5m)",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(translation_latency_seconds_sum[5m]) / rate(translation_latency_seconds_count[5m])",
+          "legendFormat": "avg latency",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "p95 Latency (s, 5m)",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(translation_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95 latency",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Average Quality Score (5m)",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(translation_quality_score_sum[5m]) / rate(translation_quality_score_count[5m])",
+          "legendFormat": "avg score",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "none", "min": 0, "max": 100 },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Cache Hits",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 6 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "sum(cache_hits_total)", "legendFormat": "cache hits", "refId": "A" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Integrity Failures",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 6 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "sum(integrity_failures_total)", "legendFormat": "integrity failures", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Security Flags",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 6 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "sum(security_flags_total)", "legendFormat": "security flags", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Translation Errors",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 6 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "sum(translation_errors_total)", "legendFormat": "errors", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Model Fallbacks",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 12 },
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "sum(model_fallback_total)", "legendFormat": "fallbacks", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Translation Volume by Language Direction",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 18 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum by (source_lang, target_lang) (rate(translations_total[5m]))",
+          "legendFormat": "{{source_lang}} → {{target_lang}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Requests per Minute (24h) — for spotting peak usage periods",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 27 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum(rate(translations_total[5m])) * 60",
+          "legendFormat": "requests/min",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqpm" }, "overrides": [] }
+    }
+  ]
+}

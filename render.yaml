@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers ${WEB_CONCURRENCY:-1}
     envVars:
       - key: OPENROUTER_API_KEY
         sync: false
@@ -14,3 +14,7 @@ services:
         value: nvidia/nemotron-3-ultra-550b-a55b:free,google/gemma-4-26b-a4b-it:free
       - key: TRANSLATOR_DB_PATH
         value: translator.db
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: WEB_CONCURRENCY
+        value: "1"
