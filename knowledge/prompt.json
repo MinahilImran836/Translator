@@ -28,7 +28,8 @@
       "ur": [
         "Prefer the plain Urdu word a real Pakistani bank actually uses when one is standard — e.g. transaction → لین دین, complaint → شکایت, installment → قسط, confirmation/verification → تصدیق. Do not default to an English word transliterated into Urdu script just because the source used English.",
         "Some English banking words genuinely are the everyday loanword real customers and banks use — e.g. account, app, card, balance, statement, branch, login, password, OTP, ATM. Keep those as the familiar loanword written in Urdu script; never coin a formal or archaic replacement for them.",
-        "When unsure, match how a real Pakistani bank SMS or app would phrase it, not a literal word-for-word rendering."
+        "When unsure, match how a real Pakistani bank SMS or app would phrase it, not a literal word-for-word rendering.",
+        "Never invent a word by writing English syllables in Urdu script (e.g. do not write برینچ لس for \"branchless\", or make up a word for \"secure\"/\"shop\"/\"convenient\"). If a word is not in the loanword list below and is not a proper noun/acronym, use the ordinary Urdu word for it."
       ]
     },
     {
@@ -92,7 +93,14 @@
     "verification": "تصدیق",
     "confirmation": "تصدیق",
     "confirmed": "تصدیق شدہ",
-    "biometric": "بائیو میٹرک"
+    "biometric": "بائیو میٹرک",
+    "branchless": "شاخ سے پاک",
+    "secure": "محفوظ",
+    "security": "تحفظ",
+    "shop": "دکان",
+    "convenient": "آسان",
+    "convenience": "آسانی",
+    "bank": "بینک"
   },
   "issue_rules": {
     "too_literal": {
